@@ -1,0 +1,45 @@
+name: Refresh Vienna auctions
+
+on:
+  schedule:
+    - cron: "17 */3 * * *"   # every 3 hours
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: auctions
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Restore previous auction state
+        uses: actions/cache/restore@v4
+        with:
+          path: state
+          key: auction-state-${{ github.run_id }}
+          restore-keys: auction-state-
+      - run: pip install --quiet curl_cffi cryptography
+      - name: Collect auctions and comparables
+        run: python3 scripts/auctions.py --out auctions.enc.json --pubkey scripts/auction_pub.pem --state state/auction_state.json
+      - name: Save auction state
+        uses: actions/cache/save@v4
+        with:
+          path: state
+          key: auction-state-${{ github.run_id }}
+      - name: Commit refreshed data
+        run: |
+          git config user.name "deal-watch-bot"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add auctions.enc.json
+          git diff --cached --quiet && echo "no change" && exit 0
+          git commit -q -m "Refresh Vienna auctions"
+          git pull --rebase -q && git push -q
