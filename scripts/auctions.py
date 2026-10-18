@@ -422,13 +422,22 @@ def agent_items(court):
             "description": text[:600], "url": WH + r["seo"], "court_ref": court_ref, "photos": [], "pdfs": [],
         }
         # merge with a matching court auction instead of listing it twice
+        # (closest plot or living area within 2% in the same district; never a different property type)
         twin = None
         if court_ref:
+            best = None
             for c in court:
+                if c.get("postcode") != plz or c.get("status") not in ("upcoming", "postponed"):
+                    continue
+                if (group == "plot") != (c.get("group") == "plot"):
+                    continue
                 cs = c.get("plot_m2") if group == "plot" else c.get("size_m2")
-                if c.get("postcode") == plz and cs and size and abs(cs - size) / size < 0.06:
-                    twin = c
-                    break
+                if not cs or not size:
+                    continue
+                gap = abs(cs - size) / size
+                if gap <= 0.02 and (best is None or gap < best[0]):
+                    best = (gap, c)
+            twin = best[1] if best else None
         if twin:
             twin["url2"] = it["url"]
             twin["agent_note"] = f"Also advertised by {it['seller'] or 'an agent'} on willhaben"
