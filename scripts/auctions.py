@@ -129,9 +129,14 @@ def edikte_doc(doc):
     zus = re.search(r"um das Meistbot von\s*(?:<[^>]+>|\s)*([\d.,]+)", t)
     if zus:
         f["Meistbot"] = zus.group(1) + " EUR"
-    photos = re.findall(r'href="(/edikte/ex/exedi3\.nsf/[^"]+\$file/[^"]+\.(?:jpg|jpeg|png))"', t, re.I)
+    photos = []
+    for ph in re.findall(r'href="(/edikte/ex/exedi3\.nsf/[^"]+\$file/[^"]+\.(?:jpg|jpeg|png))"', t, re.I):
+        if ph not in photos:
+            photos.append(ph)
+    # real photos first, site plans and floor plans last
+    photos.sort(key=lambda u: 1 if re.search(r"lageplan|grundriss|plan|gr[_ ]?top|kataster|mappe", u, re.I) else 0)
     attach = re.findall(r'href="(/edikte/ex/exedi3\.nsf/[^"]+\$file/[^"]+\.pdf)"[^>]*>([^<]*)', t, re.I)
-    f["_photos"] = ["https://edikte.justiz.gv.at" + p for p in photos[:4]]
+    f["_photos"] = ["https://edikte.justiz.gv.at" + p for p in photos[:8]]
     f["_pdfs"] = [{"url": "https://edikte.justiz.gv.at" + u, "name": clean(n)} for u, n in attach[:6]]
     f["_title"] = title
     f["_text"] = clean(t)[:20000]
@@ -511,6 +516,28 @@ def encrypt(payload, pub_pem):
     return {"v": 1, "alg": "RSA-OAEP-256+A256GCM", "updated": payload["updated"], "k": b(ek), "iv": b(iv), "ct": b(ct)}
 
 
+GEO = {}
+
+
+def geocode(addr, plz):
+    """OpenStreetMap Nominatim lookup (max 1 request per second), cached across runs in the state file."""
+    if not addr:
+        return None
+    a = re.split(r" ident |/| und |;", addr)[0].strip()
+    q = f"{a}, {plz or ''} Wien".strip() if plz and plz.startswith("1") else a
+    if q in GEO:
+        return GEO[q]
+    try:
+        r = requests.get("https://nominatim.openstreetmap.org/search", params={"format": "json", "limit": 1, "countrycodes": "at", "q": q},
+                         headers={"User-Agent": "deal-watch-tracker/1.0 (private, low volume)"}, timeout=30)
+        js = r.json() if r.status_code == 200 else []
+        GEO[q] = [float(js[0]["lat"]), float(js[0]["lon"])] if js else None
+    except Exception:
+        GEO[q] = None
+    time.sleep(1.1)
+    return GEO[q]
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True)
@@ -524,6 +551,7 @@ def main():
             state = json.load(open(a.state))
         except Exception:
             state = {}
+    GEO.update(state.get("geo") or {})
     court = court_items(state)
     try:
         agent = agent_items(court)
@@ -531,6 +559,13 @@ def main():
         log("agent scan failed", e)
         agent = state.get("agent", [])
     for it in court + agent:
+        try:
+            if it.get("status") in ("upcoming", "postponed", "open") and not it.get("lat"):
+                ll = geocode(it.get("address"), it.get("postcode"))
+                if ll:
+                    it["lat"], it["lng"] = ll
+        except Exception as e:
+            log("geocode failed", it.get("id"), e)
         try:
             value(it)
         except Exception as e:
@@ -540,7 +575,7 @@ def main():
                "items": court + agent}
     if a.state:
         os.makedirs(os.path.dirname(a.state) or ".", exist_ok=True)
-        json.dump({"court": court, "agent": agent}, open(a.state, "w"), ensure_ascii=False)
+        json.dump({"court": court, "agent": agent, "geo": GEO}, open(a.state, "w"), ensure_ascii=False)
     if a.plain:
         json.dump(payload, open(a.plain, "w"), ensure_ascii=False, indent=1)
     enc = encrypt(payload, open(a.pubkey, "rb").read())
